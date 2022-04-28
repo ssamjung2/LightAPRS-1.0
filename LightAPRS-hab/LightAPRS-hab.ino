@@ -223,7 +223,11 @@ void loop() {
         setGps_MaxPerformanceMode();
       } else if (NoGPS > 10) {
         delay(500);     
-      } 
+      }
+      #if defined(DEVMODE)
+        Serial.print("No GPS count: ");
+        Serial.println(NoGPS);
+      #endif
     }
   } else {
     //
@@ -405,7 +409,13 @@ void updateTelemetry() {
   telemetry_buff[81] = 'T';
   telemetry_buff[82] = 'x';
   telemetry_buff[83] = 'C';
-
+  dtostrf(readBatt(), 5, 2, telemetry_buff + 84);
+  telemetry_buff[89] = 'V';
+  telemetry_buff[90] = ' ';
+  sprintf(telemetry_buff + 91, "%02d", gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
+  telemetry_buff[93] = 'S';
+  telemetry_buff[94] = ' ';
+    
   #if defined(DEVMODE)
     Serial.print("Telemtery buff: ");
     Serial.println(telemetry_buff);
