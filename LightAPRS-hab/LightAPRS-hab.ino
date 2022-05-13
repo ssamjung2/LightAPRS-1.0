@@ -33,16 +33,16 @@
 
 //****************************************************************************
 char  CallSign[7]="KW9D"; //DO NOT FORGET TO CHANGE YOUR CALLSIGN
-int   CallNumber=11; //SSID http://www.aprs.org/aprs11/SSIDs.txt
+int   CallNumber=12; //SSID http://www.aprs.org/aprs11/SSIDs.txt
 char  Symbol='O'; // '/O' for balloon, '/>' for car, for more info : http://www.aprs.org/symbols/symbols-new.txt
 bool alternateSymbolTable = false ; //false = '/' , true = '\'
 
 char Frequency[9]="144.3900"; //default frequency. 144.3900 for US, 144.8000 for Europe
 
-char comment[60] = "TriValley High STEM Club Downs IL - HAB Balloon LightAPRS"; // Status Comment Message
+char comment[60] = "Olympia High STEM HA Balloon Stanford IL"; // Status Comment Message
 //*****************************************************************************
 
-unsigned int   BeaconWait=60;  //seconds sleep for next beacon (TX).
+unsigned int   BeaconWait=51;  //seconds sleep for next beacon (TX) -- actual TX is BeaconWait + ~9 seconds (runtime)
 unsigned int   BattWait=60;    //seconds sleep if super capacitors/batteries are below BattMin (important if power source is solar panel)
 unsigned int   StatusWait=5;   //min minutes between status messages
 
@@ -77,20 +77,27 @@ mdode to increase the chances of the GPS achieving a lock at the cost of additio
 */
 boolean StatusAlways = true;
 //*****************************************************************************
+unsigned status;
 
 //boolean GpsFirstFix=false;
 boolean ublox_high_alt_mode = false;
 boolean ublox_high_performance_mode = false;
  
-static char telemetry_buff[100];// telemetry buffer
-static char status_buff[100];// status buffer
-word TxCount = 1;
-word TelemetryCount = 1;
-word StatusCount = 1;
+char telemetry_buff[100];  // telemetry buffer
+char status_buff[100];     // status buffer
+
+// TX Counters
+word TxCount = 0;
+word TelemetryCount = 0;
+word StatusCount = 0;
 word NoGPS = 0;
 
-unsigned status;
+// ARISS Mode
 boolean arissModEnabled = false;
+
+// Balloon pop free fall
+unsigned long LowestPressure = 0;
+boolean ExpressReturn = false;
 
 TinyGPSPlus gps;
 Adafruit_BMP085 bmp;
@@ -113,7 +120,7 @@ void setup() {
   RfPttOFF;
   AprsPinInput;
 
-  Serial.begin(57600);
+  Serial.begin(115200);
   Serial1.begin(9600);
 #if defined(DEVMODE)
   Serial.println(F("Booting..."));
@@ -127,14 +134,30 @@ void setup() {
   APRS_setPath2("WIDE2", Wide2);
   APRS_useAlternateSymbolTable(alternateSymbolTable); 
   APRS_setSymbol(Symbol);
-  //increase following value (for example to 500UL) if you experience packet loss/decode issues. 
+  //increase following value (for example to 500UL), default 350, if you experience packet loss/decode issues. 
   APRS_setPreamble(350UL);  
   APRS_setPathSize(pathSize);
 
   configDra818(Frequency);
 
   bmp.begin();
-  bme.begin(BME280_ADDRESS_ALTERNATE);
+
+  // You can also pass in a Wire library object like &Wire2
+  // status = bme.begin(0x76, &Wire2)
+  status = bme.begin(BME280_ADDRESS_ALTERNATE);
+  #if defined(DEVMODE)
+    Serial.print(F("SensorID was: 0x")); Serial.println(bme.sensorID(),16);
+    Serial.print(F("        ID of 0xFF probably means a bad address, a BMP 180 or BMP 085\n"));
+    Serial.print(F("   ID of 0x56-0x58 represents a BMP 280,\n"));
+    Serial.print(F("        ID of 0x60 represents a BME 280.\n"));
+    Serial.print(F("        ID of 0x61 represents a BME 680.\n"));
+  #endif
+  
+  if (!status) {
+    Serial.println(F("Could not find a valid BME280 sensor, check wiring, address, sensor ID!"));
+    //while (true) delay(10);
+  } 
+  
  
 }
 
@@ -149,15 +172,20 @@ void loop() {
     // Startup TX status (before GPS fix)
     //
     if(aliveStatus){
+        sprintf(status_buff, "%s", comment);
+
         #if defined(DEVMODE)
           Serial.println(F("Starting up..."));
+          Serial.print(F("Status buff: "));
+          Serial.println(status_buff);
         #endif
-        sprintf(status_buff, "%s", comment);
+  
         sendStatus();
         #if defined(DEVMODE)
           Serial.println(F("Wake up message sent"));
         #endif
         aliveStatus = false;
+        blankline(status_buff, 60);
      }
 
     //
@@ -193,41 +221,30 @@ void loop() {
           APRS_setPathSize(pathSize);
         }
 
-        //
-        //Send status message based on status interval
-        //
-        if(gps.time.minute() % StatusWait == 0){
-          sendStatus();
-        } else {
-          sendLocation();
-        }
+        // Send telemetry
+        sendLocation();
         
+        //Send status message based on status interval
+        if(gps.time.minute() % StatusWait == 0){
+          sleepSeconds(30);
+          sendStatus();
+          sleepSeconds((BeaconWait-30));
+        } else {
+          sleepSeconds(BeaconWait);          
+        }
+
         freeMem();
         Serial.flush();
         NoGPS = 0;
-        sleepSeconds(BeaconWait);
         
       } else {
         #if defined(DEVMODE)
           Serial.println(F("Not enough sattelites")); 
         #endif
+        failsafe_mode(30);
       }
     } else {
-      //
-      // Advance fail safe
-      //
-      NoGPS++;
-      if (NoGPS > 10 && NoGPS % 100 == 0) {
-        updateStatusFail();
-        sendStatus();
-        setGps_MaxPerformanceMode();
-      } else if (NoGPS > 10) {
-        delay(500);     
-      }
-      #if defined(DEVMODE)
-        Serial.print("No GPS count: ");
-        Serial.println(NoGPS);
-      #endif
+      failsafe_mode(30);
     }
   } else {
     //
@@ -237,6 +254,34 @@ void loop() {
   }
 }
 
+void failsafe_mode(int sec){
+  #if defined(DEVMODE)
+    Serial.print(F("No GPS count: "));
+    Serial.println(NoGPS);
+  #endif
+
+  float pressure = bme.readPressure() / 100.0; //Pa to hPa
+  if ((pressure - LowestPressure == 50) && (pressure > LowestPressure)){
+    ExpressReturn = true;
+  }
+  
+  #if defined(DEVMODE)
+    Serial.print(F("Current pressure: "));
+    Serial.println(pressure);
+    Serial.print(F("Lowest pressure: "));
+    Serial.println(LowestPressure);
+    Serial.print(F("Express route back to earth: ")); Serial.println(ExpressReturn);
+  #endif
+
+  NoGPS++;
+  if ((NoGPS > 15) || (ExpressReturn)) {
+    sleepSeconds(sec);
+    updateStatusFail();
+    sendStatus();
+    //setGps_MaxPerformanceMode();  // Experimental   
+  } 
+ 
+}
 
 void aprs_msg_callback(struct AX25Msg *msg) {
   //do not remove this function, necessary for LibAPRS
@@ -278,7 +323,11 @@ byte configDra818(char *freq)
   RfOFF;
   pinMode(PIN_DRA_TX,INPUT);
   #if defined(DEVMODE)
-    if (ack[0] == 0x30) Serial.println(F("Frequency set...")); else Serial.println(F("Frequency update error!"));
+    if (ack[0] == 0x30){
+      Serial.println(F("Frequency set..."));
+    } else {
+      Serial.println(F("Frequency update error!"));
+    }
   #endif
   return (ack[0] == 0x30) ? 1 : 0;
 }
@@ -366,10 +415,18 @@ void updatePosition() {
   APRS_setLon(lonStr);
 }
 
+// blank 
+void blankline(char* msg, int msg_len){
+  for (int i=1; i < msg_len; i++){
+    msg[i] = ' ';
+  }
+}
+
 void updateTelemetry() {
   //
-  // Updating telemetry string
+  // Updating telemetry string - Max 67 chars
   //
+  blankline(telemetry_buff, 60);
   sprintf(telemetry_buff, "%03d", gps.course.isValid() ? (int)gps.course.deg() : 0);
   telemetry_buff[3] += '/';
   sprintf(telemetry_buff + 4, "%03d", gps.speed.isValid() ? (int)gps.speed.knots() : 0);
@@ -378,48 +435,38 @@ void updateTelemetry() {
   telemetry_buff[9] = '=';
   sprintf(telemetry_buff + 10, "%06lu", (long)gps.altitude.feet());
   telemetry_buff[16] = ' ';
-  sprintf(telemetry_buff + 17, "%03d", (int)gps.location.age());
-  telemetry_buff[20] = 'A';
-  telemetry_buff[21] = ' ';
-  sprintf(telemetry_buff + 22, "%05d", gps.hdop.isValid() ? (int)gps.hdop.value() : 0);
-  telemetry_buff[27] = 'H';
-  telemetry_buff[28] = ' '; 
-  telemetry_buff[29] = ' '; float tempC = bmp.readTemperature();//-21.4;//
-  dtostrf(tempC, 6, 2, telemetry_buff + 30);
-  telemetry_buff[36] = 'C';
-  telemetry_buff[37] = ' '; float pressure = bmp.readPressure() / 100.0; //Pa to hPa
-  dtostrf(pressure, 7, 2, telemetry_buff + 38);
-  telemetry_buff[45] = 'h';
-  telemetry_buff[46] = 'P';
-  telemetry_buff[47] = 'a';
-  telemetry_buff[48] = ' '; tempC = bme.readTemperature();//-21.4//
-  dtostrf(tempC, 6, 2, telemetry_buff + 49);  
-  telemetry_buff[55] = 'C';
-  telemetry_buff[56] = ' '; pressure = bme.readPressure() / 100.0; //Pa to hPa
-  dtostrf(pressure, 7, 2, telemetry_buff + 57);
-  telemetry_buff[64] = 'h';
-  telemetry_buff[65] = 'P';
-  telemetry_buff[66] = 'a';
-  telemetry_buff[67] = ' '; float humidty = bme.readHumidity();// 21.1%
-  dtostrf(humidty, 6, 2, telemetry_buff + 68);
-  telemetry_buff[74] = '%';
-  telemetry_buff[75] = ' ';
-  sprintf(telemetry_buff + 76, "%04d", TelemetryCount);
-  telemetry_buff[80] = ' ';
-  telemetry_buff[81] = 'T';
-  telemetry_buff[82] = 'x';
-  telemetry_buff[83] = 'C';
-  dtostrf(readBatt(), 5, 2, telemetry_buff + 84);
-  telemetry_buff[89] = 'V';
-  telemetry_buff[90] = ' ';
-  sprintf(telemetry_buff + 91, "%02d", gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
-  telemetry_buff[93] = 'S';
-  telemetry_buff[94] = ' ';
-    
+  sprintf(telemetry_buff + 17, "%05d", gps.hdop.isValid() ? (int)gps.hdop.value() : 0);
+  telemetry_buff[22] = 'H';
+  telemetry_buff[23] = ' '; float tempC = bmp.readTemperature();//-21.4;//
+  dtostrf(tempC, 4, 2, telemetry_buff + 24);
+  telemetry_buff[28] = 'C';
+  telemetry_buff[29] = ' '; float pressure = bmp.readPressure() / 100.0; //Pa to hPa
+  dtostrf(pressure, 4, 2, telemetry_buff + 30);
+  telemetry_buff[34] = 'h';
+  telemetry_buff[35] = 'P';
+  telemetry_buff[36] = 'a';
+  telemetry_buff[37] = ' '; tempC = bme.readTemperature();//-21.4//
+  dtostrf(tempC, 4, 2, telemetry_buff + 38);  
+  telemetry_buff[42] = 'C';
+  telemetry_buff[43] = ' '; pressure = bme.readPressure() / 100.0; //Pa to hPa
+  dtostrf(pressure, 4, 2, telemetry_buff + 44);
+  telemetry_buff[48] = 'h';
+  telemetry_buff[49] = 'P';
+  telemetry_buff[50] = 'a';
+  telemetry_buff[51] = ' '; float humidty = bme.readHumidity();// 21.1%
+  dtostrf(humidty, 4, 2, telemetry_buff + 52);
+  telemetry_buff[58] = '%';
+  telemetry_buff[59] = ' ';
+   
   #if defined(DEVMODE)
-    Serial.print("Telemtery buff: ");
+    Serial.print(F("Telemtery buff: "));
     Serial.println(telemetry_buff);
   #endif
+
+  pressure = bme.readPressure() / 100.0; //Pa to hPa
+  if (pressure < LowestPressure){
+    LowestPressure = pressure;
+  }
 }
 
 void sendLocation() {
@@ -445,16 +492,16 @@ void sendLocation() {
   timestamp_buff[6] = 'h';
 
   #if defined(DEVMODE)
-    Serial.print("Telemetry buffer length: ");
+    Serial.print(F("Telemetry buffer length: "));
     Serial.println(String(strlen(telemetry_buff)));
-    Serial.println("Turning RF ON");
+    Serial.println(F("Turning RF ON"));
   #endif
 
   RfON;
   delay(2000);
 
   #if defined(DEVMODE)
-    Serial.println("Turning on PTT");
+    Serial.println(F("Turning on PTT"));
   #endif
   
   RfPttON;
@@ -471,92 +518,95 @@ void sendLocation() {
     Serial.println(F("Location sent"));
   #endif
   
-  TxCount++;
-  TelemetryCount++;
+  TxCount+=1;
+  TelemetryCount+=1;
 }
 
+// Update status message buffer for normal status info
 void updateStatus() {
+  blankline(status_buff, 60);
+  dtostrf(readBatt(), 5, 2, status_buff);
+  status_buff[5] = 'V';
+  status_buff[6] = ' ';
+  sprintf(status_buff + 7, "%02d", (int)gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
+  status_buff[9] = 'S';
+  status_buff[10] = ' ';
+  sprintf(status_buff + 11, "%05d", gps.hdop.isValid() ? (int)gps.hdop.value() : 0);
+  status_buff[16] = 'H';
+  status_buff[17] = ' ';
+  sprintf(status_buff + 18, "%08d", gps.failedChecksum());
+  status_buff[26] = 'F';
+  status_buff[27] = ' ';
+  sprintf(status_buff + 28, "%04d", TxCount);
+  status_buff[32] = 'T';
+  status_buff[33] = ' ';
+  sprintf(status_buff + 34, "%04d", TelemetryCount);
+  status_buff[38] = 'T';
+  status_buff[39] = ' ';
+  sprintf(status_buff + 40, "%04d", StatusCount);
+  status_buff[44] = 'T';
+  status_buff[45] = ' ';
 
-    dtostrf(readBatt(), 5, 2, status_buff);
-    status_buff[5] = 'V';
-    status_buff[6] = ' ';
-    sprintf(status_buff + 7, "%02d", gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
-    status_buff[9] = 'S';
-    status_buff[10] = ' ';
-    sprintf(status_buff + 11, "%05d", gps.hdop.isValid() ? (int)gps.hdop.value() : 0);
-    status_buff[16] = 'H';
-    status_buff[17] = ' ';  
-    sprintf(status_buff + 18, "%08d", (int)gps.charsProcessed());
-    status_buff[26] = 'C';
-    status_buff[27] = 'h';
-    status_buff[28] = ' ';
-    sprintf(status_buff + 29, "%08d", (int)gps.failedChecksum());
-    status_buff[37] = 'F';
-    status_buff[38] = ' ';
-    sprintf(status_buff + 39, "%s", comment);
+  #if defined(DEVMODE)
+    Serial.print(F("Status buff: "));
+    Serial.println(status_buff);
+  #endif
 
-    #if defined(DEVMODE)
-      Serial.print("Status buff: ");
-      Serial.println(status_buff);
-    #endif    
+  float pressure = bme.readPressure() / 100.0; //Pa to hPa
+  if (pressure < LowestPressure){
+    LowestPressure = pressure;
+  } 
 }
 
+// Update status message buffer for failsafe mode
 void updateStatusFail() {
 
-  if (TxCount % 6 != 0) { 
-    float tempC = bmp.readTemperature();//-21.4;//
-    dtostrf(tempC, 6, 2, status_buff);
-    status_buff[6] = 'C';
-    status_buff[7] = ' '; float pressure = bmp.readPressure() / 100.0; //Pa to hPa
-    dtostrf(pressure, 7, 2, status_buff + 8);
-    status_buff[15] = 'h';
-    status_buff[16] = 'P';
-    status_buff[17] = 'a';
-    status_buff[18] = ' '; tempC = bme.readTemperature();//-21.4//
-    dtostrf(tempC, 6, 2, status_buff + 19);  
-    status_buff[24] = 'C';
-    status_buff[25] = ' '; pressure = bme.readPressure() / 100.0; //Pa to hPa
-    dtostrf(pressure, 7, 2, status_buff + 26);
-    status_buff[33] = 'h';
-    status_buff[34] = 'P';
-    status_buff[35] = 'a';
-    status_buff[36] = ' '; float humidty = bme.readHumidity();// 21.1%
-    dtostrf(humidty, 6, 2, status_buff + 37);
-    status_buff[43] = '%';
-    status_buff[44] = ' ';
-    sprintf(status_buff + 45, "%04d", TxCount);
-    status_buff[49] = ' ';
-    status_buff[50] = 'T';
-    status_buff[51] = 'x';
-    status_buff[52] = 'C';
-    dtostrf(readBatt(), 5, 2, status_buff + 53);
-    status_buff[58] = 'V';
+  blankline(status_buff, 60);
+  if ((TxCount % 6 != 0) || (ExpressReturn)) {
+    blankline(status_buff, 60);
+    sprintf(status_buff, "%03d", gps.course.isValid() ? (int)gps.course.deg() : 0);
+    status_buff[3] += ' ';
+    sprintf(status_buff + 4, "%03d", gps.speed.isValid() ? (int)gps.speed.knots() : 0);
+    status_buff[7] = 'K';
+    status_buff[8] = ' ';
+    status_buff[9] = ' ';
+    sprintf(status_buff + 10, "%06lu", gps.altitude.isValid() ? (long)gps.altitude.feet() : 0);
+    status_buff[16] = ' ';
+    sprintf(status_buff + 17, "%05d", gps.hdop.isValid() ? (int)gps.hdop.value() : 0);
+    status_buff[22] = 'H';
+    status_buff[23] = ' '; float tempC = bmp.readTemperature();//-21.4;//
+    dtostrf(tempC, 4, 2, status_buff + 24);
+    status_buff[28] = 'C';
+    status_buff[29] = ' '; float pressure = bmp.readPressure() / 100.0; //Pa to hPa
+    dtostrf(pressure, 4, 2, status_buff + 30);
+    status_buff[34] = 'h';
+    status_buff[35] = 'P';
+    status_buff[36] = 'a';
+    status_buff[37] = ' '; tempC = bme.readTemperature();//-21.4//
+    dtostrf(tempC, 4, 2, status_buff + 38);  
+    status_buff[42] = 'C';
+    status_buff[43] = ' '; pressure = bme.readPressure() / 100.0; //Pa to hPa
+    dtostrf(pressure, 4, 2, status_buff + 44);
+    status_buff[48] = 'h';
+    status_buff[49] = 'P';
+    status_buff[50] = 'a';
+    status_buff[51] = ' '; float humidty = bme.readHumidity();// 21.1%
+    dtostrf(humidty, 4, 2, status_buff + 52);
+    status_buff[58] = '%';
     status_buff[59] = ' ';
-    sprintf(status_buff + 60, "%02d", gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
-    status_buff[62] = 'S';
-    status_buff[63] = ' ';
-    sprintf(status_buff + 64, "%05d", gps.hdop.isValid() ? (int)gps.hdop.value() : 0);
-    status_buff[69] = 'H';
-    status_buff[70] = ' ';  
-    sprintf(status_buff + 71, "%08d", (int)gps.charsProcessed());
-    status_buff[79] = 'C';
-    status_buff[80] = 'h';
-    status_buff[81] = ' ';
-    sprintf(status_buff + 82, "%08d", (int)gps.failedChecksum());
-    status_buff[90] = 'F';
-    status_buff[91] = 'C';
-    status_buff[92] = ' ';
-    sprintf(status_buff + 93, "%04d", StatusCount);
-    
   } else {
     sprintf(status_buff, "%s", comment);
   }
 
   #if defined(DEVMODE)
-    Serial.print("Status buff: ");
+    Serial.print(F("Status buff: "));
     Serial.println(status_buff);
   #endif
 
+  float pressure = bme.readPressure() / 100.0; //Pa to hPa
+  if (pressure < LowestPressure){
+    LowestPressure = pressure;
+  }
 }
 
 void sendStatus() {
@@ -571,16 +621,16 @@ void sendStatus() {
   }
 
   #if defined(DEVMODE)
-    Serial.print("Status buffer length: ");
+    Serial.print(F("Status buffer length: "));
     Serial.println(String(strlen(status_buff)));
-    Serial.println("Turning RF ON");
+    Serial.println(F("Turning RF ON"));
   #endif
 
   RfON;
   delay(2000);
 
   #if defined(DEVMODE)
-    Serial.println("Turnning PTT ON");  
+    Serial.println(F("Turning PTT ON"));  
   #endif
   RfPttON;
   delay(1000);
@@ -597,8 +647,8 @@ void sendStatus() {
   Serial.println(F("Status sent"));
 #endif
 
-  TxCount++;
-  StatusCount++;
+  TxCount+=1;
+  StatusCount+=1;
 }
 
 static void updateGpsData(int ms)
