@@ -4,7 +4,13 @@ LightAPRS is one of the most affordable, smallest, lightest, powerful and open s
 It is able to report location, altitude, temperature and pressure to the internet ([APRS-IS](http://status.aprs2.net)) or direct to an amateur radio once a minute with a solar panel/supercapacitors or just 4xAAA batteries.
 Because LightAPRS is open source you can add your own custom sensors via I2C/SPI pins.
 
-LightAPRS is available on http://shop.qrp-labs.com/aprs/lightaprs for order. If you need an APRS+WSPR tracker than checkout our new module [LightAPRS-W](https://github.com/lightaprs/LightAPRS-W-1.0) or LoRa/LoRaWAN tracker [LightTracker](https://github.com/lightaprs/LightTracker-1.0).
+LightAPRS is available on http://shop.qrp-labs.com/aprs/lightaprs for order. If you need an APRS+WSPR tracker than checkout:
+
+**LightAPRS-W 1.0:** https://github.com/lightaprs/LightAPRS-W-1.0
+
+**LightAPRS-W 2.0:** https://github.com/lightaprs/LightAPRS-W-2.0 (New)
+
+**LoRa/LoRaWAN Tracker:** https://github.com/lightaprs/LightTracker-1.0
 
 <img src="images/lightaprs-pinout.jpg" width="600">
 
@@ -66,8 +72,8 @@ Download and install [Arduino IDE](https://www.arduino.cc/en/Main/Software). If 
 - Separate the URLs using a comma ( , ) if you have more than one URL
 - Open the **Tools > Board > Boards Manager...** menu item. [[Screenshot]](images/arduino-tools-boards-manager.png)
 - Wait for the platform indexes to finish downloading.
-- Type "MightyCore" in the search bar until you see the **MightyCore** entry and click on it. <img src="images/arduino-boards-manager-mightycore-install.png">
-- Click **Install** .
+- Type "MightyCore" in the search bar until you see the **MightyCore** entry and click on it and select version **2.2.2** <img width="797" alt="image" src="https://github.com/lightaprs/LightAPRS-1.0/assets/48382675/bf89169c-7419-425f-ac0d-5a47803926c2">
+- Click **Install** . (Do not install version 3.0.0)
 - After installation is complete, close the **Boards Manager** window.
 
 ### 4.Configure MightyCore
