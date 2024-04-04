@@ -39,6 +39,14 @@ static bool Dev_FoxHunt = false;  // Development mode for testing FoxHunt
 // Andrew D Blessing KW9D
 // Josh Verbarg KD9ZSY
 // Tom Pankonen KD9SAT 
+//
+char  CallSign[7]="KW9D"; //DO NOT FORGET TO CHANGE YOUR CALLSIGN
+int   CallNumber=11; //SSID http://www.aprs.org/aprs11/SSIDs.txt
+char  Symbol='O'; // '/O' for balloon, '/>' for car, for more info : http://www.aprs.org/symbols/symbols-new.txt
+bool  alternateSymbolTable = false ; //false = '/' , true = '\'
+
+char  comment[50] = "#ARIES";                       // Tag for Telemetry message
+char  StatusMessage[50] = "Bloomington Area Career Center (BACC) IL";   // Status message
 
 char  Frequency[9]="144.3900";   //default frequency. 144.3900 for US, 144.8000 for Europe
 //char  FoxhuntFreq[9]="144.3900"; //frequency to start transmitting on after we descend for foxhunting
