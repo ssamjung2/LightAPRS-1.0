@@ -36,13 +36,9 @@ static bool Dev_Failsafe = false; // Development mode for testing Failsafe
 static bool Dev_FoxHunt = false;  // Development mode for testing FoxHunt
 
 //****************************************************************************
-char  CallSign[7]="KW9D"; //DO NOT FORGET TO CHANGE YOUR CALLSIGN
-int   CallNumber=11; //SSID http://www.aprs.org/aprs11/SSIDs.txt
-char  Symbol='O'; // '/O' for balloon, '/>' for car, for more info : http://www.aprs.org/symbols/symbols-new.txt
-bool  alternateSymbolTable = false ; //false = '/' , true = '\'
-
-char  comment[50] = "#ARIES-III";                       // Tag for Telemetry message
-char  StatusMessage[50] = "Bloomington Area Career Center (BACC) IL";   // Status message
+// Andrew D Blessing KW9D
+// Josh Verbarg KD9ZSY
+// Tom Pankonen KD9SAT 
 
 char  Frequency[9]="144.3900";   //default frequency. 144.3900 for US, 144.8000 for Europe
 //char  FoxhuntFreq[9]="144.3900"; //frequency to start transmitting on after we descend for foxhunting
@@ -493,22 +489,23 @@ void updateTelemetry() {
   telemetry_buff[31] = ' '; float pressure = bmp.readPressure() / 100.0; //Pa to hPa
   dtostrf(pressure, 7, 2, telemetry_buff + 32);
   telemetry_buff[39] = 'h';
-  telemetry_buff[40] = 'P';
-  telemetry_buff[41] = 'a';
-  telemetry_buff[42] = ' ';
-  dtostrf(readBatt(), 5, 2, telemetry_buff + 43);
-  telemetry_buff[48] = 'V';
-  telemetry_buff[49] = ' '; tempC = bme.readTemperature();//-21.4//
-  dtostrf(tempC, 4, 2, telemetry_buff + 50);  
+//  telemetry_buff[40] = 'P';
+//  telemetry_buff[41] = 'a';
+  telemetry_buff[40] = ' ';
+  dtostrf(readBatt(), 5, 2, telemetry_buff + 41);
+  telemetry_buff[46] = 'V';
+  telemetry_buff[47] = ' '; tempC = bme.readTemperature();//-21.4//
+  dtostrf(tempC, 6, 2, telemetry_buff + 48);  
   telemetry_buff[54] = 'C';
   telemetry_buff[55] = ' '; pressure = bme.readPressure() / 100.0; //Pa to hPa
-  dtostrf(pressure, 4, 2, telemetry_buff + 56);
-  telemetry_buff[60] = 'h';
-  telemetry_buff[61] = ' '; float humidty = bme.readHumidity();// 21.1%
-  dtostrf(humidty, 4, 2, telemetry_buff + 62);
-  telemetry_buff[66] = '%';
-  telemetry_buff[67] = ' ';
-  sprintf(telemetry_buff + 68, "%s", comment);    
+  dtostrf(pressure, 7, 2, telemetry_buff + 56);
+  telemetry_buff[63] = 'h';
+//  telemetry_buff[61] = ' '; float humidty = bme.readHumidity();// 21.1%
+//  dtostrf(humidty, 4, 2, telemetry_buff + 62);
+//  telemetry_buff[66] = '%';
+//  telemetry_buff[67] = ' ';
+  telemetry_buff[64] = ' ';
+  sprintf(telemetry_buff + 65, "%s", comment);    
 
   #if defined(DEVMODE)
     Serial.print(F("Telemtery buff: "));
