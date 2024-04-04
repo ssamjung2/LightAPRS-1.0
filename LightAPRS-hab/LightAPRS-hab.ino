@@ -14,6 +14,7 @@
 #define BattPin     A2
 #define PIN_DRA_RX  22
 #define PIN_DRA_TX  23
+#define SEALEVELPRESSURE_HPA (1013.25)
 
 #define ADC_REFERENCE REF_3V3
 #define OPEN_SQUELCH false
@@ -31,6 +32,8 @@
 #define AprsPinOutput pinMode(12,OUTPUT);pinMode(13,OUTPUT);pinMode(14,OUTPUT);pinMode(15,OUTPUT)
 
 #define DEVMODE // Development mode. Uncomment to enable for debugging.
+static bool Dev_Failsafe = false; // Development mode for testing Failsafe
+static bool Dev_FoxHunt = false;  // Development mode for testing FoxHunt
 
 //****************************************************************************
 char  CallSign[7]="KW9D"; //DO NOT FORGET TO CHANGE YOUR CALLSIGN
@@ -38,10 +41,16 @@ int   CallNumber=11; //SSID http://www.aprs.org/aprs11/SSIDs.txt
 char  Symbol='O'; // '/O' for balloon, '/>' for car, for more info : http://www.aprs.org/symbols/symbols-new.txt
 bool  alternateSymbolTable = false ; //false = '/' , true = '\'
 
-char  comment[50] = "#BalloonName";// Max 50 char
-char  StatusMessage[50] = "Bloomington IL School Name";
+char  comment[50] = "#ARIES-III";                       // Tag for Telemetry message
+char  StatusMessage[50] = "Bloomington Area Career Center (BACC) IL";   // Status message
 
-char  Frequency[9]="144.3900"; //default frequency. 144.3900 for US, 144.8000 for Europe
+char  Frequency[9]="144.3900";   //default frequency. 144.3900 for US, 144.8000 for Europe
+//char  FoxhuntFreq[9]="144.3900"; //frequency to start transmitting on after we descend for foxhunting
+//char  FoxhuntFreq[9]="145.3000"; //frequency to start transmitting on after we descend for foxhunting
+
+static uint16_t foxhuntAlt=1500;       //altitude in ft to turn on the foxhunting beacon on descent
+uint16_t        flyAlt=3000;           //altitude in ft we must exceed to trigger foxhunt mode on descent
+bool            flyAltReached = false; //did we exceed the flyAlt or not?
 
 //*****************************************************************************
 
@@ -53,7 +62,7 @@ float BattMin=4.5;        // min Volts to wake up.
 float DraHighVolt=8.0;    // min Volts for radio module (DRA818V) to transmit (TX) 1 Watt, below this transmit 0.5 Watt. You don't need 1 watt on a balloon. Do not change this.
 //float GpsMinVolt=4.0;     //min Volts for GPS to wake up. (important if power source is solar panel) 
 boolean aliveStatus = true;     //for tx status message on first wake-up just once.
-
+boolean initialLock = false;    //initial gps lock to limit failsafe mode
 boolean beaconViaARISS = false; //try to beacon via ARISS (International Space Station) https://www.amsat.org/amateur-radio-on-the-iss/
 unsigned int   ARISSWait=5;    //minutes between attempts at using ARISS (International Space Station)
 unsigned long  ARISSAlt=75000; //altitude (feet) to opportunistically attempt ARISS based on ARISSWait interval (ISS pass takes ~90 mins) https://spotthestation.nasa.gov/tracking_map.cfm 
@@ -80,6 +89,9 @@ used to determine when to send status messages.  Additionally, when the tracker 
 mdode to increase the chances of the GPS achieving a lock at the cost of additional power consumption.  This is not recommended for pico balloon.
 */
 boolean gpsLock = false; //Keep track if we have a valid GPS lock or not
+
+//uint16_t FxCount = 1; //increase +1 after every second spent transmitting foxhunt signal
+float tempAltitude = 0; //store the current loop altitude for calculating foxhunting
 
 //*****************************************************************************
 unsigned status;
@@ -162,8 +174,7 @@ void setup() {
     Serial.println(F("Could not find a valid BME280 sensor, check wiring, address, sensor ID!"));
     //while (true) delay(10);
   } 
-  
- 
+
 }
 
 void loop() {
@@ -198,14 +209,37 @@ void loop() {
     if ((gps.location.age() < 1000 || gps.location.isUpdated()) && gps.location.isValid()) {
       if (gps.satellites.isValid() && (gps.satellites.value() > 3)) {
 
+        if (Dev_Failsafe) {
+          Serial.println(F("==> DevMode for Failsafe"));
+          initialLock = true;
+          failsafe_mode(30);
+          return;
+        }
+
         gpsLock = true;
+        if (!initialLock) {
+          initialLock = true;
+        }
         updatePosition();
         updateTelemetry();    
       
         //GpsOFF;
         //setGPS_PowerSaveMode();
         //GpsFirstFix=true;
-
+        tempAltitude = gps.altitude.feet();
+        if(!flyAltReached && tempAltitude > flyAlt && (bmp.readAltitude(SEALEVELPRESSURE_HPA) * 3.2808399) > flyAlt)
+        { 
+          //Make sure GPS and BME pressure agree we flew above the target altitude. If not we can trigger false flights during initial lock.
+          #if defined(DEVMODE)
+            Serial.println(F("==> Flight altitude reached!"));
+          #endif
+          flyAltReached = true;
+        } else {
+          if (Dev_FoxHunt) {
+            Serial.println(F("==> DevMode for FoxHunt"));
+            flyAltReached = true;
+          }
+        }
         //
         // Set APRS based on altitude
         //
@@ -235,7 +269,16 @@ void loop() {
         freeMem();
         Serial.flush();
         NoGPS = 0;
-        
+
+        if(flyAltReached && tempAltitude < foxhuntAlt && (bmp.readAltitude(SEALEVELPRESSURE_HPA) * 3.2808399) < foxhuntAlt) {
+          #if defined(DEVMODE)  
+            Serial.println(F("Sending FoxHunt"));
+          #endif 
+          sendFoxhunt(15);
+          sendFoxhunt(15);
+          sendFoxhunt(15);
+        }
+
       } else {
         #if defined(DEVMODE)
           Serial.println(F("Not enough sattelites")); 
@@ -264,7 +307,7 @@ void failsafe_mode(int sec){
     Serial.print(F("GPS Lock: ")); Serial.println(gpsLock);
   #endif
 
-  float pressure = bme.readPressure() / 100.0; //Pa to hPa
+  float pressure = bmp.readPressure() / 100.0; //Pa to hPa
   if ((pressure - LowestPressure == 50) && (pressure > LowestPressure)){
     ExpressReturn = true;
   }
@@ -276,9 +319,11 @@ void failsafe_mode(int sec){
   #endif
 
   NoGPS++;
-  if ((NoGPS > 15) || ((ExpressReturn) && !gps.location.isUpdated() && !gps.location.isValid())) {
+  if ((NoGPS > 30 && initialLock) || ((ExpressReturn) && !gps.location.isUpdated() && !gps.location.isValid())) {
     char msg[100];
-    sprintf(msg, "No Gps Lock: Time %02d-%02d-%02d %02d:%02d:%02d, %4.0fM, %6.0fPa", gps.date.year(), gps.date.month(), gps.date.day(), gps.time.hour(), gps.time.minute(), gps.time.second(), gps.altitude.meters(), pressure); 
+    char strpressure[7];
+    dtostrf(bmp.readPressure() / 100.0, 4, 2, strpressure);
+    sprintf(msg, "No Gps Lock: Time %02d-%02d-%02d %02d:%02d:%02d %s", gps.date.year(), gps.date.month(), gps.date.day(), gps.time.hour(), gps.time.minute(), gps.time.second(), strpressure); 
     sleepSeconds(sec);
     sendStatus(msg);
     //setGps_MaxPerformanceMode();  // Experimental   
@@ -463,6 +508,7 @@ void updateTelemetry() {
   dtostrf(humidty, 4, 2, telemetry_buff + 62);
   telemetry_buff[66] = '%';
   telemetry_buff[67] = ' ';
+  sprintf(telemetry_buff + 68, "%s", comment);    
 
   #if defined(DEVMODE)
     Serial.print(F("Telemtery buff: "));
@@ -516,9 +562,11 @@ void sendLocation() {
   //APRS_sendLoc(telemetry_buff, strlen(telemetry_buff)); //beacon without timestamp
   APRS_sendLocWtTmStmp(telemetry_buff, strlen(telemetry_buff), timestamp_buff); //beacon with timestamp
   
+  delay(10);
   while(digitalRead(1)){;}//LibAprs TX Led pin PB1
-  delay(50);
+  delay(100);
   RfPttOFF;
+  delay(50);
   RfOFF;
 
   #if defined(DEVMODE)
@@ -570,8 +618,9 @@ void sendStatus(const char *msg) {
   delay(10);
 
   while(digitalRead(1)){;}//LibAprs TX Led pin PB1
-  delay(50);
+  delay(100);
   RfPttOFF;
+  delay(50);
   RfOFF;
 
   #if defined(DEVMODE)
@@ -635,6 +684,75 @@ void freeMem() {
 #if defined(DEVMODE)
   Serial.print(F("Free RAM: ")); Serial.print(freeMemory()); Serial.println(F(" byte"));
 #endif
+}
+
+void sendFoxhunt(int secDuration) {
+
+  #if defined(DEVMODE)
+    Serial.println(F("==> Sending Foxhunt"));
+  #endif
+  RfPwrLow; //DRA Power 0.5 Watt
+
+  int hh = gps.time.hour();
+  int mm = gps.time.minute();
+  int ss = gps.time.second();
+
+  char timestamp_buff[7];
+
+  sprintf(timestamp_buff, "%02d", gps.time.isValid() ? (int)gps.time.hour() : 0);
+  sprintf(timestamp_buff + 2, "%02d", gps.time.isValid() ? (int)gps.time.minute() : 0);
+  sprintf(timestamp_buff + 4, "%02d", gps.time.isValid() ? (int)gps.time.second() : 0);
+  timestamp_buff[6] = 'h';
+
+  #if defined(DEVMODE)
+    Serial.print(F("Telemetry buffer length: "));
+    Serial.println(String(strlen(telemetry_buff)));
+    Serial.println(F("Turning RF ON"));
+  #endif
+
+  RfON;
+  delay(2000);
+
+  #if defined(DEVMODE)
+    Serial.println(F("Turning on PTT"));
+  #endif
+  
+  RfPttON;
+  delay(1000);
+  
+  //APRS_sendLoc(telemetry_buff, strlen(telemetry_buff)); //beacon without timestamp
+  updatePosition();
+  updateTelemetry();
+  APRS_sendLocWtTmStmp(telemetry_buff, strlen(telemetry_buff), timestamp_buff); //beacon with timestamp
+  delay(500);
+
+  //APRS_sendLoc(telemetry_buff, strlen(telemetry_buff)); //beacon without timestamp
+  updatePosition();
+  updateTelemetry();
+  APRS_sendLocWtTmStmp(telemetry_buff, strlen(telemetry_buff), timestamp_buff); //beacon with timestamp 
+  delay(500);
+
+  //APRS_sendLoc(telemetry_buff, strlen(telemetry_buff)); //beacon without timestamp
+  updatePosition();
+  updateTelemetry();
+  APRS_sendLocWtTmStmp(telemetry_buff, strlen(telemetry_buff), timestamp_buff); //beacon with timestamp
+  delay(500);
+
+  delay(10);
+  while(digitalRead(1)){;}//LibAprs TX Led pin PB1
+  delay(100);
+  RfPttOFF;
+  delay(50);
+  RfOFF;
+
+  #if defined(DEVMODE)
+    Serial.print(F("Foxhunt sent (Freq: "));
+    Serial.print(Frequency);
+    Serial.println(F(")"));
+  #endif
+
+  sleepSeconds(secDuration);
+
 }
 
 void gpsDebug() {
